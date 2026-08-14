@@ -5659,7 +5659,7 @@ $header = [IMAGE_DOS_HEADER]$headerPtr
 Write-Host ("Is Same ? {0}" -f ($header.e_cs -eq 2))
 
 ## Using SizeOf & PtrToStructure
-$stringPtr = New-IntPtr ([Marshal]::SizeOf([Type][UNICODE_STRING]))
+$stringPtr = New-IntPtr -Size ([Marshal]::SizeOf([Type][UNICODE_STRING]))
 [marshal]::WriteInt16($stringPtr, 0x00, 0x08)
 [marshal]::WriteInt16($stringPtr, 0x02, 0x0a)
 [marshal]::WriteIntPtr($stringPtr, [IntPtr]::Size, ([Marshal]::StringToHGlobalUni('Test')))
@@ -7696,7 +7696,7 @@ function Update-Dacl {
                 $newAce.AceFlags = [Int32]$obj.Flags
                 $newAce.Mask     = [Int32]$obj.Access
 
-                $newAcePtr = New-IntPtr $newAce.AceSize
+                $newAcePtr = New-IntPtr -Size $newAce.AceSize
                 [Marshal]::StructureToPtr($newAce, $newAcePtr, $False)
             
                 # ($offset+0x08) // Sid Start
@@ -8211,7 +8211,7 @@ Function Adjust-TokenPrivileges {
 
         # Allocate memory for SID and domain
         $pSid = New-IntPtr -Size $AccSize
-        $domainPtr = New-IntPtr (($domainSize + 2) * 2)
+        $domainPtr = New-IntPtr -Size (($domainSize + 2) * 2)
 
         # Second lookup to get full SID and domain name
         $ret = $Global:advapi32::LookupAccountNameW(
@@ -8442,7 +8442,7 @@ Function Adjust-TokenPrivileges {
 
         $CountOfRights = $Privilege.Length
         $blockSize = [UIntPtr]::new(([IntPtr]::Size)* 2)
-        $UserRights = New-IntPtr ($CountOfRights * (([IntPtr]::Size)* 2))
+        $UserRights = New-IntPtr -Size ($CountOfRights * (([IntPtr]::Size)* 2))
  
         try {
             $idx = -1
