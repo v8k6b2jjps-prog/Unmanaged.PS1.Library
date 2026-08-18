@@ -6395,7 +6395,7 @@ function Initialize-ApiObject {
         $SysCallPtr = [IntPtr]::Zero
         if ([IntPtr]::Size -gt 4) {
             if (![TEB]::IsRobustValidx64Stub($funcAddress)) {
-                $dllName = if (($ApiSpec.Dll).EndsWith('.dll')) { $dllName } else { "$($ApiSpec.Dll).dll" }
+                $dllName = if (($ApiSpec.Dll).EndsWith('.dll')) { $ApiSpec.Dll } else { "$($ApiSpec.Dll).dll" }
                 $SysCallPtr = New-IntPtr -Data (
                     Get-SysCallData -DllName $dllName -FunctionName $ApiSpec.Function -BytesToRead 25
                 )
