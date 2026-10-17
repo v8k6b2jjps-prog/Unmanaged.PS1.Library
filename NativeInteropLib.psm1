@@ -9160,12 +9160,14 @@ Function NtCurrentTeb {
     #>
 
     param (
+        
         # Mode options for retrieving the TEB address:
         # Return   -> value returned directly in CPU register
         # Pinned   -> use a managed variable pinned in memory
         # Buffer   -> use an unmanaged temporary buffer
         # GCHandle -> use a GCHandle pinned buffer
         # Remote   -> using Callback, to receive to TEB pointer
+
         [Parameter(Mandatory = $false, Position = 0)]
         [ValidateSet("Return" ,"Pinned", "Buffer", "GCHandle", "Remote")]
         [string]$Mode = "Return",
@@ -9176,16 +9178,25 @@ Function NtCurrentTeb {
         [string]$Method = "Base",
 
         # Optional flags to select which fields to read from TEB/PEB
+        [Parameter(Mandatory = $false, Position = 2)]
         [switch]$ClientID,
+        [Parameter(Mandatory = $false, Position = 3)]
         [switch]$Peb,
+        [Parameter(Mandatory = $false, Position = 4)]
         [switch]$Ldr,
+        [Parameter(Mandatory = $false, Position = 5)]
         [switch]$ProcessHeap,
+        [Parameter(Mandatory = $false, Position = 6)]
         [switch]$Parameters,
+        [Parameter(Mandatory = $false, Position = 7)]
+        [switch]$ImageBase,
     
         # Enable logging/debug output
+        [Parameter(Mandatory = $false, Position = 8)]
         [switch]$Log,
 
         # Self Check Function
+        [Parameter(Mandatory = $false, Position = 9)]
         [switch]$SelfCheck
     )
 
@@ -9216,47 +9227,64 @@ Function NtCurrentTeb {
         ** Ret
         #>
 
-        $shellcode        = [byte[]]@()
-        $is64             = [IntPtr]::Size -gt 4
-        $ret              = [byte[]]([byte]0xC3)
+        $shellcode = [System.Collections.Generic.List[byte]]::new()
+        $is64      = [IntPtr]::Size -gt 4
+        $ret       = [byte[]]([byte]0xC3)
 
-        if ($is64) {
-            $addClient = [byte[]]@([byte]0x48,[byte]0x83,[byte]0xC0,[byte]0x40)  # add rax, 0x40          // gs:[0x40]
-            $movPeb    = [byte[]]@([byte]0x48,[byte]0x8B,[byte]0x40,[byte]0x60)  # mov rax, [rax + 0x60]  // gs:[0x60] // RtlGetCurrentPeb
-            $movLdr    = [byte[]]@([byte]0x48,[byte]0x8B,[byte]0x40,[byte]0x18)  # mov rax, [rax + 0x18]
-            $movParams = [byte[]]@([byte]0x48,[byte]0x8B,[byte]0x40,[byte]0x20)  # mov rax, [rax + 0x20]
-            $movHeap   = [byte[]]@([byte]0x48,[byte]0x8B,[byte]0x40,[byte]0x30)  # mov rax, [rax + 0x30]
-            $basePtr   = [byte[]]@([byte]0x65,[byte]0x48,[byte]0x8B,[byte]0x04,  # mov rax, gs:[0x30]     #// Self dereference pointer at gs:[0x30],
-                                   [byte]0x25,[byte]0x30,[byte]0x00,[byte]0x00,                           #// so, effectually, return to gs->0x0
-                                   [byte]0x00)
-            $InByRef  = [byte[]]@([byte]0x48,[byte]0x89,[byte]0x01)              # mov [rcx], rax         #// moves the 64-bit value from the RAX register
-                                                                                                          #// into the memory location pointed to by the RCX register.
-        }
-        else {
-            $addClient = [byte[]]@([byte]0x83,[byte]0xC0,[byte]0x20)             # add eax, 0x20          // fs:[0x20]
-            $movPeb    = [byte[]]@([byte]0x8B,[byte]0x40,[byte]0x30)             # mov eax, [eax + 0x30]  // fs:[0x30] // RtlGetCurrentPeb
-            $movLdr    = [byte[]]@([byte]0x8B,[byte]0x40,[byte]0x0C)             # mov eax, [eax + 0x0c]
-            $movParams = [byte[]]@([byte]0x8B,[byte]0x40,[byte]0x10)             # mov eax, [eax + 0x10]
-            $movHeap   = [byte[]]@([byte]0x8B,[byte]0x40,[byte]0x18)             # mov eax, [eax + 0x18]
-            $basePtr   = [byte[]]@([byte]0x64,[byte]0xA1,[byte]0x18,             # mov eax, fs:[0x18]     #// Self dereference pointer at fs:[0x18], 
-                                   [byte]0x00,[byte]0x00,[byte]0x00)                                      #// so, effectually, return  to fs->0x0
-            $InByRef = [byte[]]@(
-                [byte]0x8B, [byte]0x4C, [byte]0x24, [byte]0x04,                  # mov ecx, [esp + 4]     ; load first argument pointer from stack into ECX
-                [byte]0x89, [byte]0x01                                           # mov [ecx], eax         ; store 32-bit value from EAX into memory pointed by ECX
+        $GetBytes = {
+            param ($Hex)
+            return (
+                $Hex -split '\s+' | ForEach-Object { [Convert]::ToByte($_, 16) }
             )
         }
 
-        $shellcode = $basePtr
-        if ($ClientID) { $shellcode += $addClient }
-        if ($Peb) {
-            $shellcode += $movPeb
-            if ($Ldr) { $shellcode += $movLdr }
-            if ($Parameters) { $shellcode += $movParams }
-            if ($ProcessHeap) { $shellcode += $movHeap }
+        if ($is64) {
+
+            $addClient   = [byte[]](& $GetBytes "48 83 C0 40")                # add rax, 0x40
+            $movPeb      = [byte[]](& $GetBytes "48 8B 40 60")                # mov rax, [rax + 0x60]
+            $movLdr      = [byte[]](& $GetBytes "48 8B 40 18")                # mov rax, [rax + 0x18]
+            $movParams   = [byte[]](& $GetBytes "48 8B 40 20")                # mov rax, [rax + 0x20]
+            $movHeap     = [byte[]](& $GetBytes "48 8B 40 30")                # mov rax, [rax + 0x30]
+            $movImage    = [byte[]](& $GetBytes "48 8B 40 10")                # mov rax, [rax + 0x10]
+            $basePtr     = [byte[]](& $GetBytes "65 48 8B 04 25 30 00 00 00") # mov rax, gs:[0x30]
+            $InByRef     = [byte[]](& $GetBytes "48 89 01")                   # mov [rcx], rax
+
+        }  else {
+
+            $addClient   = [byte[]](& $GetBytes "83 C0 20")                   # add eax, 0x20
+            $movPeb      = [byte[]](& $GetBytes "8B 40 30")                   # mov eax, [eax + 0x30]
+            $movLdr      = [byte[]](& $GetBytes "8B 40 0C")                   # mov eax, [eax + 0x0c]
+            $movParams   = [byte[]](& $GetBytes "8B 40 10")                   # mov eax, [eax + 0x10]
+            $movHeap     = [byte[]](& $GetBytes "8B 40 18")                   # mov eax, [eax + 0x18]
+            $movImage    = [byte[]](& $GetBytes "8B 40 08")                   # mov eax, [eax + 0x08]
+            $basePtr     = [byte[]](& $GetBytes "64 A1 18 00 00 00")          # mov eax, fs:[0x18]
+            $InByRef     = [byte[]](& $GetBytes "8B 4C 24 04 89 01")          # mov ecx, [esp + 4]; mov [ecx], eax
+
         }
-        if ($Mode -ne "Return") {$shellcode += $InByRef}
-        $shellcode += $ret
-        $shellcode
+
+        # Build the stream efficiently
+        $shellcode.AddRange($basePtr)
+    
+        if ($ClientID) { 
+            $shellcode.AddRange($addClient) 
+        }
+    
+        if ($Peb) {
+            $shellcode.AddRange($movPeb)
+            if ($Ldr)        { $shellcode.AddRange($movLdr) }
+            if ($Parameters) { $shellcode.AddRange($movParams) }
+            if ($ProcessHeap){ $shellcode.AddRange($movHeap) }
+            if ($ImageBase)  { $shellcode.AddRange($movImage) }
+        }
+
+        if ($Mode -ne "Return") { 
+            $shellcode.AddRange($InByRef) 
+        }
+    
+        $shellcode.AddRange($ret)
+        return (
+          [byte[]]($shellcode.ToArray())
+		)
     }
 
     if ($SelfCheck) {
@@ -9327,12 +9355,12 @@ Function NtCurrentTeb {
         return
     }
 
-    if ($Ldr -or $Parameters -or $ProcessHeap) {
+    if ($Ldr -or $Parameters -or $ProcessHeap -or $ImageBase) {
       $Peb = $true
     }
-    $Count = [bool]$Ldr -and [bool]$Parameters + [bool]$ProcessHeap
-    if ($Count -ge 1) {
-        throw "Cannot specify both -Ldr and -Parameters. Choose one."
+    [Int32]$Count = ([bool]$Ldr) + ([bool]$Parameters) + ([bool]$ProcessHeap) + ([bool]$ImageBase)
+    if ($Count -ge 2) {
+        throw "Choose only one (-Ldr, -Parameters, -ProcessHeap, or -ImageBase)."
     }
     if ($ClientID -and $Peb) {
         throw "Cannot specify both -ClientID and -Peb. Choose one."
@@ -9473,13 +9501,15 @@ Function NtCurrentTeb {
             if ($isX64) {
                 $CallbackResult = [Marshal]::ReadIntPtr([TEB]::CallbackResult, 0x60)
                 if ($Ldr) { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x18) }
-                if ($Parameters) { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x20) }
+                if ($Parameters)  { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x20) }
                 if ($ProcessHeap) { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x30) }
+                if ($ImageBase)   { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x10) }
             } else {
                 $CallbackResult = [Marshal]::ReadIntPtr([TEB]::CallbackResult, 0x30)
                 if ($Ldr) { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x0c) }
-                if ($Parameters) { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x10) }
+                if ($Parameters)  { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x10) }
                 if ($ProcessHeap) { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x18) }
+                if ($ImageBase)   { $CallbackResult = [Marshal]::ReadIntPtr($CallbackResult, 0x08) }
             }
             return $CallbackResult
         }
@@ -9937,54 +9967,28 @@ Managed code ? sure.
 [Process]::GetCurrentProcess().Modules
 
 #>
-function Read-MemoryValue {
+function Get-UnicodeStringFromBuffer {
     param (
-        [Parameter(Mandatory)]
-        [IntPtr]$LinkPtr,
-
-        [Parameter(Mandatory)]
-        [int]$Offset,
-
-        [Parameter(Mandatory)]
-        [ValidateSet("IntPtr","Int16", "UInt16", "Int32", "UInt32", "UnicodeString")]
-        [string]$Type
+        [byte[]]$Buffer,
+        [int]$Offset
     )
+    # Read string length (USHORT at struct offset)
+    $length = [BitConverter]::ToUInt16($Buffer, $Offset)
+    if ($length -eq 0) { return "" }
 
-    # Calculate the actual address to read from:
-    $Address = [IntPtr]::Add($LinkPtr, $Offset)
+    # Buffer pointer starts after Length (2) + MaximumLength (2) + alignment padding (4 on x64) = offset + 8 (on x64) or + 4 (on x86)
+    $ptrOffset = if ([IntPtr]::Size -eq 8) { $Offset + 8 } else { $Offset + 4 }
+    
+    $stringPtr = if ([IntPtr]::Size -eq 8) {
+        [IntPtr][BitConverter]::ToInt64($Buffer, $ptrOffset)
+    } else {
+        [IntPtr][BitConverter]::ToInt32($Buffer, $ptrOffset)
+    }
 
-    try {
-        switch ($Type) {
-            "IntPtr" {
-                return [Marshal]::ReadIntPtr($Address)
-            }
-            "Int16" {
-                return [Marshal]::ReadInt16($Address)
-            }
-            "UInt16" {
-                $rawValue = [Marshal]::ReadInt16($Address)
-                return [UInt16]($rawValue -band 0xFFFF)
-            }
-            "Int32" {
-                return [Marshal]::ReadInt32($Address)
-            }
-            "UInt32" {
-                return [UInt32]([Marshal]::ReadInt32($Address))
-            }
-            "UnicodeString" {
-                try {
-                    $strData = Parse-NativeString -StringPtr $Address -Encoding Unicode | Select-Object -ExpandProperty StringData
-                    return $strData
-                }
-                catch {}
-                return $null
-            }
-        }
-    }
-    catch {
-        Write-Warning "Failed to read memory value at offset 0x$([Convert]::ToString($Offset,16)) (Type: $Type). Error: $_"
-        return $null
-    }
+    if ($stringPtr -eq [IntPtr]::Zero) { return "" }
+
+    # Marshal string characters directly from memory
+    return [Marshal]::PtrToStringUni($stringPtr, $length / 2)
 }
 function Get-LoadedModules {
     param (
@@ -9993,7 +9997,9 @@ function Get-LoadedModules {
         [string]$SortType = "Memory",
 
         [Parameter(Mandatory=$false)]
-        [IntPtr]$Peb = [IntPtr]::Zero
+        [IntPtr]$Peb = [IntPtr]::Zero,
+
+        [switch]$First
     )
 
     Enum PebOffset_x86 {
@@ -10010,12 +10016,11 @@ function Get-LoadedModules {
         FullDllName = 0x24
         BaseDllName = 0x2C
         Flags = 0x34
-        
-        # ObsoleteLoadCount
         LoadCount = 0x38
-
         LoadReason = 0x94
         ReferenceCount = 0x9C
+        SigningLevel = 0xA4
+        StructSize = 0xA8
     }
     Enum PebOffset_x64 {
         ldrOffset = 0x18
@@ -10031,12 +10036,11 @@ function Get-LoadedModules {
         FullDllName = 0x48
         BaseDllName = 0x58
         Flags = 0x68
-
-        # ObsoleteLoadCount
         LoadCount = 0x6C
-
         LoadReason = 0x010C
         ReferenceCount = 0x0114
+        SigningLevel = 0x011C
+        StructSize = 0x0128
     }
     if ([IntPtr]::Size -eq 8) {
         $PebOffset = [PebOffset_x64]
@@ -10059,10 +10063,7 @@ function Get-LoadedModules {
 
     try {
         
-        # Storage to hold module list
         $modules = @()
-
-        # Determine offsets based on sorting type
         switch ($SortType) {
             "Load" {
                 $ModuleListOffset   = $PebOffset::InLoadOrderModuleList.value__
@@ -10095,26 +10096,38 @@ function Get-LoadedModules {
         #>
         $NextLinkPtr = [Marshal]::ReadIntPtr($ListHeadPtr)
 
-        <#
-           Shift offset, to Fix BaseAddress MAP,
-           so, calculate -> NextLinkPtr & (+Offset -StructBaseOffset) == Data Object *Fixed* Offset
-           will be used later when call Read-MemoryValue function.
-        #>
-        $PebOffsetMap = @{}
-        foreach ($Name in ("DllBase", "EntryPoint", "SizeOfImage", "FullDllName", "BaseDllName", "Flags", "LoadCount" , "LoadReason", "ReferenceCount")) {
-            $PebOffsetMap[$Name] = $PebOffset.GetField($Name).GetRawConstantValue() - $LinkOffsetInEntry
-        }
-
-        # Start parse Data
-
         do {
+            $EntrySize = [int]$PebOffset::StructSize.value__
+            $Buffer = New-Object byte[] $EntrySize
 
-            $flagsValue = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['Flags'] -Type UInt32
+            $StructBasePtr = [IntPtr](([int64]$NextLinkPtr) - $LinkOffsetInEntry)
+            [Marshal]::Copy($StructBasePtr, $Buffer, 0, $EntrySize)
+
+            $BaseAddress = if ([IntPtr]::Size -eq 8) {
+                [IntPtr][BitConverter]::ToInt64($Buffer, $PebOffset::DllBase.value__)
+            } else {
+                [IntPtr][BitConverter]::ToInt32($Buffer, $PebOffset::DllBase.value__)
+            }
+
+            $EntryPoint = if ([IntPtr]::Size -eq 8) {
+                [IntPtr][BitConverter]::ToInt64($Buffer, $PebOffset::EntryPoint.value__)
+            } else {
+                [IntPtr][BitConverter]::ToInt32($Buffer, $PebOffset::EntryPoint.value__)
+            }
+
+            $SizeOfImage     = [BitConverter]::ToUInt32($Buffer, $PebOffset::SizeOfImage.value__)
+            $flagsValue      = [BitConverter]::ToUInt32($Buffer, $PebOffset::Flags.value__)
+            $LoadReasonValue = [BitConverter]::ToUInt32($Buffer, $PebOffset::LoadReason.value__)
+            $ReferenceCount  = [BitConverter]::ToUInt16($Buffer, $PebOffset::ReferenceCount.value__)
+            $SigningLevel    = $Buffer[$PebOffset::SigningLevel.value__]
+
+            $FullDllName = Get-UnicodeStringFromBuffer -Buffer $Buffer -Offset $PebOffset::FullDllName.value__
+            $ModuleName  = Get-UnicodeStringFromBuffer -Buffer $Buffer -Offset $PebOffset::BaseDllName.value__
+
             $allFlagValues = [Enum]::GetValues([LdrFlagsMap])
-            $FlagNames = $allFlagValues | ? {  ($flagsValue -band [int]$_) -ne 0  } | ForEach-Object { $_.ToString() }
-            $ReadableFlags = if ($FlagNames.Count -gt 0) {  $FlagNames -join ", "  } else {  "None"  }
+            $FlagNames = $allFlagValues | ? { ($flagsValue -band [int]$_) -ne 0 } | ForEach-Object { $_.ToString() }
+            $ReadableFlags = if ($FlagNames.Count -gt 0) { $FlagNames -join ", " } else { "None" }
 
-            $LoadReasonValue = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['LoadReason'] -Type UInt32
             try {
                 $LoadReasonName = [LdrLoadReasonMap]$LoadReasonValue
             } catch {
@@ -10122,28 +10135,22 @@ function Get-LoadedModules {
             }
 
             $modules += [PSCustomObject]@{
-                BaseAddress = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['DllBase']     -Type IntPtr
-                EntryPoint  = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['EntryPoint']  -Type IntPtr
-                SizeOfImage = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['SizeOfImage'] -Type UInt32
-                FullDllName = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['FullDllName'] -Type UnicodeString
-                ModuleName  = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['BaseDllName'] -Type UnicodeString
-                Flags       = $ReadableFlags
-                LoadReason  = $LoadReasonName
-                ReferenceCount = Read-MemoryValue -LinkPtr $NextLinkPtr -Offset $PebOffsetMap['ReferenceCount'] -Type UInt16
-                LoadAsData  = $false
+                BaseAddress    = $BaseAddress
+                EntryPoint     = $EntryPoint
+                SizeOfImage    = $SizeOfImage
+                FullDllName    = $FullDllName
+                ModuleName     = $ModuleName
+                Flags          = $ReadableFlags
+                LoadReason     = $LoadReasonName
+                ReferenceCount = $ReferenceCount
+                SigningLevel   = $SigningLevel
+                LoadAsData     = $false
             }
-
-            <#
-                [LIST_ENTRY], 0x? -> [LIST_ENTRY] ???OrderLinks
-                *Flink --> Next [LIST_ENTRY] -> [LDR_DATA_TABLE_ENTRY]
-                So, we Read Item Pointer for next [LIST_ENTRY], AKA [LDR_DATA_TABLE_ENTRY]
-                but, again, not BaseAddress of [LDR_DATA_TABLE_ENTRY], it depend on user Req.
-                [LDR_DATA_TABLE_ENTRY] --> 0x0 -> [LIST_ENTRY], [LIST_ENTRY], [LIST_ENTRY], [Actuall Data]
-            #>
-			
+            
+            # Next Pointer ..
             $NextLinkPtr = [Marshal]::ReadIntPtr($NextLinkPtr)
 
-        } while ($NextLinkPtr -ne $ListHeadPtr)
+        } while ($NextLinkPtr -ne $ListHeadPtr -and -not $First)
     }
     catch {
         Write-Warning "Failed to enumerate modules. Error: $_"
