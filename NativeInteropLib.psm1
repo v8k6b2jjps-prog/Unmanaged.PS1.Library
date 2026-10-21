@@ -3891,13 +3891,23 @@ function Process-Parameters {
             }
 
             # Split the type and name (e.g., "uint Flags" -> "uint", "Flags")
-            $parts = $typeAndName.Split(' ', 2) 
+            $parts = $typeAndName.Split(' ', 2)
             if ($parts.Length -eq 2) {
                 $type = $parts[0]
                 $name = $parts[1]
-                $fixedType = $type # Default to original type if no match
 
-                switch ($type.ToLowerInvariant()) {
+                # --- ARRAY SUPPORT (patch) ---
+                # Peel off trailing [] (including nested like byte[][]) so the switch below
+                # matches on the scalar name only. The suffix is re-attached afterwards.
+                $arrSuffix = ''
+                $baseType = $type
+                if ($baseType -match '^(.+?)(\[\](?:\[\])*)$') {
+                    $baseType = $Matches[1]
+                    $arrSuffix = $Matches[2]
+                }
+                $fixedType = $baseType # Default to original (base) type if no match
+
+                switch ($baseType.ToLowerInvariant()) {
                     # Fully qualified .NET types
                     "system.boolean" { $fixedType = "bool" }
                     "system.byte"    { $fixedType = "byte" }
@@ -4085,6 +4095,13 @@ function Process-Parameters {
                     "pzzwstr"       { $fixedType = "string" }             # Unicode string
                     "pczzwstr"      { $fixedType = "string" }
                 }
+
+                # --- ARRAY SUPPORT (patch) ---
+                # Re-attach the [] suffix so "uint32[] arr" -> "uint[] arr", "byte[]" stays "byte[]", etc.
+                if (-not [string]::IsNullOrEmpty($arrSuffix)) {
+                    $fixedType = "$fixedType$arrSuffix"
+                }
+
                 # Reconstruct the parameter string with the fixed type and optional modifier
                 $formattedParam = "$fixedType $name"
                 if (-not [STRING]::IsNullOrEmpty($modifier)) {
@@ -4110,10 +4127,19 @@ function Process-ReturnType {
         [string]$ReturnType
     )
 
-    $fixedReturnType = $ReturnType
+    # --- ARRAY SUPPORT (patch) ---
+    # Peel off trailing [] so the switch matches on the scalar name only.
+    $arrSuffix = ''
+    $baseReturn = $ReturnType
+    if ($baseReturn -match '^(.+?)(\[\](?:\[\])*)$') {
+        $baseReturn = $Matches[1]
+        $arrSuffix = $Matches[2]
+    }
 
-    switch ($ReturnType.ToLowerInvariant()) {
-        
+    $fixedReturnType = $baseReturn
+
+    switch ($baseReturn.ToLowerInvariant()) {
+
         # Void
         "void"           { $fixedReturnType = "void" }
 
@@ -4303,6 +4329,15 @@ function Process-ReturnType {
         "pczztstr"      { $fixedReturnType = "IntPtr" }
         "pzzwstr"       { $fixedReturnType = "string" }             # Unicode string
         "pczzwstr"      { $fixedReturnType = "string" }
+    }
+
+    # --- ARRAY SUPPORT (patch) ---
+    # Re-attach the [] suffix. 'void[]' is nonsense, so refuse that one explicitly.
+    if (-not [string]::IsNullOrEmpty($arrSuffix)) {
+        if ($fixedReturnType -eq 'void') {
+            throw "void[] is not a valid return type."
+        }
+        $fixedReturnType = "$fixedReturnType$arrSuffix"
     }
 
     return $fixedReturnType
@@ -6640,7 +6675,15 @@ function Invoke-UnmanagedMethod {
     $Count = 0
     [void][int]::TryParse($Values.Count,[ref]$count)
     $lazyMode = (-not $Params) -and ($Count -gt 0)
-    $IsArrayObj = $Count -eq 1 -and $Values[0] -is [System.Array]
+
+    # Only reject when the single value is a plain [object[]] wrapper (classic
+    # "forgot to splat with @()" mistake). A single primitive array like [byte[]]
+    # or [uint[]] is a legitimate single argument and must be allowed through.
+    $IsArrayObj = (
+        $Count -eq 1 -and
+        $Values[0] -is [System.Array] -and
+        $Values[0].GetType().GetElementType() -eq [object]
+    )
 
     if (-not $Return) {
         $Return = "Int32"
@@ -6652,26 +6695,76 @@ function Invoke-UnmanagedMethod {
     }
 
     if ($lazyMode) {
-        
-        try {
-            $idx = 0
-            $Params = (
-                $Values | % {
-                    ++$idx
-                    if ($_.Value -or ($_ -is [ref])) {
-                        $byRef = 'ref '
-                        $Name  = $_.Value.GetType().Name
-                    }
-                    else {
-                        $byRef = ''
-                        $Name  = $_.GetType().Name
-                    }
-                    "{0}{1} {2}" -f $byRef, $Name, (Get-Base26Name -idx $idx)
+
+        # --- Local helper: map a .NET Type to a C# type keyword string. ---
+        # Handles scalars, arrays (any rank), and falls back to the short CLR name
+        # for structs the caller may be using (Guid, custom structs, etc).
+        $resolveScalar = {
+            param([type]$t)
+            switch ($t.FullName) {
+                'System.Byte'    { 'byte'    ; break }
+                'System.SByte'   { 'sbyte'   ; break }
+                'System.Int16'   { 'short'   ; break }
+                'System.UInt16'  { 'ushort'  ; break }
+                'System.Int32'   { 'int'     ; break }
+                'System.UInt32'  { 'uint'    ; break }
+                'System.Int64'   { 'long'    ; break }
+                'System.UInt64'  { 'ulong'   ; break }
+                'System.Single'  { 'float'   ; break }
+                'System.Double'  { 'double'  ; break }
+                'System.Boolean' { 'bool'    ; break }
+                'System.Char'    { 'char'    ; break }
+                'System.String'  { 'string'  ; break }
+                'System.IntPtr'  { 'IntPtr'  ; break }
+                'System.UIntPtr' { 'UIntPtr' ; break }
+                'System.Decimal' { 'decimal' ; break }
+                'System.Object'  { 'object'  ; break }
+                default          { $t.Name }
+            }
+        }
+        $resolveCS = {
+            param($obj)
+            if ($null -eq $obj) { return 'IntPtr' }
+            $t = $obj.GetType()
+            if ($t.IsArray) {
+                # Walk nested arrays (byte[][] etc.) just in case.
+                $rankSuffix = ''
+                $elem = $t
+                while ($elem.IsArray) {
+                    $rankSuffix = '[]' + $rankSuffix
+                    $elem = $elem.GetElementType()
                 }
-            ) -join ", "
+                return (& $resolveScalar $elem) + $rankSuffix
+            }
+            return (& $resolveScalar $t)
+        }
+
+        try {
+            # NOTE: index-based iteration, NOT pipeline. Pipeline unrolls arrays
+            # even inside an [object[]] wrapper when the wrapper has only one slot,
+            # which would turn a single [byte[]] argument into N scalar params.
+            $pieces = New-Object System.Collections.Generic.List[string]
+            for ($i = 0; $i -lt $Values.Count; $i++) {
+                $v    = $Values[$i]
+                $name = Get-Base26Name -idx ($i + 1)
+
+                if ($v -is [System.Management.Automation.PSReference]) {
+                    if ($null -eq $v.Value) {
+                        throw ("Cannot infer type for parameter #{0}: [ref] holds `$null. " +
+                               "Pre-seed the variable (e.g. `$x = [byte[]]@() or `$x = [uint32]0) " +
+                               "or supply -Params explicitly.") -f ($i + 1)
+                    }
+                    $csType = & $resolveCS $v.Value
+                    $pieces.Add(("ref {0} {1}" -f $csType, $name))
+                } else {
+                    $csType = & $resolveCS $v
+                    $pieces.Add(("{0} {1}" -f $csType, $name))
+                }
+            }
+            $Params = ($pieces -join ", ")
         }
         catch {
-            throw "auto parse params fail"
+            throw ("auto parse params fail: {0}" -f $_.Exception.Message)
         }
 
         $CharSet = if ($Function -like "*A") { "Ansi" } else { "Unicode" }
@@ -9143,6 +9236,19 @@ public static class TEB
 
     [DllImport("ntdll.dll", CallingConvention = CallingConvention.StdCall)]
     public static extern IntPtr RtlGetCurrentTransaction();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    public static extern IntPtr GetModuleHandleW(IntPtr lpModuleName);
+
+    [DllImport("psapi.dll", SetLastError = true)] // (or kernel32.dll on newer Windows versions)
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    public static extern bool EnumProcessModules(
+        IntPtr hProcess,
+        IntPtr lphModule,
+        uint cb,
+        out uint lpcbNeeded
+    );
 }
 "@
 Add-Type -TypeDefinition $TEB -ErrorAction Stop
@@ -9335,6 +9441,21 @@ Function NtCurrentTeb {
         $Offset = if ($isX64) {0x17B8} else {0x0FAC}
         $txnPtr = [Marshal]::ReadIntPtr((NtCurrentTeb -Peb), $Offset)
         Write-Host ("PEB offset 0x{0:X} value: {1}" -f $Offset, $txnPtr)
+
+        # --- Added Module Handle & EnumProcessModules Tests ---
+        Write-Host "`nImageBase Test" -ForegroundColor Green
+        $imageBaseViaTeb = NtCurrentTeb -ImageBase
+        Write-Host ("NtCurrentTeb -ImageBase: {0}" -f $imageBaseViaTeb)
+        
+        $moduleHandleViaApi = [TEB]::GetModuleHandleW([IntPtr]::Zero)
+        Write-Host ("GetModuleHandleW(Zero): {0}" -f $moduleHandleViaApi)
+
+        [uint32]$lpcbNeeded = 0
+        $hModules = [Marshal]::AllocHGlobal(0x18)
+        [TEB]::EnumProcessModules(-1, $hModules, 0x18, [ref]$lpcbNeeded) | Out-Null
+        $moduleViaEnum = [Marshal]::ReadInt64($hModules)
+        Write-Host ("EnumProcessModules Base: {0}" -f $moduleViaEnum)
+        [Marshal]::FreeHGlobal($hModules)
 
         Write-Host "`nNtCurrentTeb Mode Test" -ForegroundColor Green
         $defaultPtr = [Marshal]::ReadIntPtr((NtCurrentTeb -Log), [IntPtr]::Size)
