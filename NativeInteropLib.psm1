@@ -14628,6 +14628,7 @@ function Write-FeatureData {
     [Buffer]::BlockCopy([BitConverter]::GetBytes($Priority), 0, $data, 4, 4)               # 0x04
     [Buffer]::BlockCopy([BitConverter]::GetBytes($VariantPayloadKind), 0, $data, 20, 4)    # 0x14
     [Buffer]::BlockCopy([BitConverter]::GetBytes($Variant), 0, $data, 24, 4)               # 0x18
+    [Buffer]::BlockCopy([BitConverter]::GetBytes($VariantPayload), 0, $data, 24, 4)        # 0x18 // FIX
     [Buffer]::BlockCopy([BitConverter]::GetBytes($Operation), 0, $data, 28, 4)             # 0x1C
     
     # Legacy Slot (0x08)
@@ -14771,7 +14772,8 @@ function Set-FeatureConfiguration {
                     -Priority $Priority `
                     -EnabledState $EnabledState `
                     -Operation $OperationType `
-                    -Variant $variantValue
+                    -Variant $variantValue `
+                    -VariantPayload $variantValue
             }
         }
 
@@ -15012,7 +15014,7 @@ function Get-FeatureObjectFromPtr {
     $Info.IsWexpConfiguration  = (($flags -shr 6) -band 0x1)
     $Info.HasSubscriptions     = [bool](($flags -shr 7) -band 0x1)
 
-    $Info.Variant              = $Info.Variant = (($flags -shr 8) -band 0x3F) -band 0x1F
+    $Info.Variant              = (($flags -shr 8) -band 0x3F) -band 0x1F
     $Info.VariantPayloadKind   = ($flags -shr 14) -band 0x3
     $Info.VariantPayload       = [uint32]$vPay
     $Info.Reserved             = 0x0 #($flags -shr 16) -band 0xFFFF
@@ -15283,9 +15285,9 @@ function Get-KernelObjectFromPtr {
     # then decode EnabledState = bits 4-5, Variant = bits 0-3/0-5. The XOR is internal.
 
     # Set the Variant value by ensuring the 6th bit (0x20) is set (OR operation)
-    $kObj.VariantRaw              = (($flags -shr 8) -band 0x3F)
+    $kObj.VariantRaw              = (($flags -shr 24) -band 0x3F)
     # # Variant extraction: lower 6 bits first, then mask out upper bit to get lower 5 bits
-    $kObj.Variant                 = (($flags -shr 8) -band 0x3F) -band 0x1F
+    $kObj.Variant                 = (($flags -shr 24) -band 0x3F) -band 0x1F
 
     $kObj.VariantPayloadKind      = ($flags -shr 14) -band 0x3
     $kObj.VariantPayload          = [uint32]$vPay
